@@ -1,4 +1,7 @@
 export default {
-    base: '/Yaku/'
+    base: '/Yaku/',
+    build: {
+        outDir: 'docs',
+    }
 }
 
