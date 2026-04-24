@@ -40,7 +40,7 @@
     .tab-btn.active { border-color: var(--accent); background: rgba(155,142,255,0.18); color: var(--accent2); }
     .build-layout { flex: 1; display: flex; overflow: hidden; min-height: 0; }
     .sidebar {
-      width: 30rel; flex-shrink: 0; border-right: 1px solid var(--border);
+      width: 30rem; flex-shrink: 0; border-right: 1px solid var(--border);
       padding: 14px 12px; overflow-y: auto; background: rgba(0,0,0,0.15);
     }
     .main-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -124,3 +124,4 @@
       .app-header { padding: 10px 12px; gap: 10px; }
       .sidebar, .hand-area, .analysis-area { padding: 10px; }
     }
+  
