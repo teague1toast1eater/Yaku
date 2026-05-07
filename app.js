@@ -52,14 +52,16 @@ function _decompose(tiles, pair, melds, results) {
   const sorted = [...tiles].sort(tileSort);
   const first = sorted[0];
 
+  // Try triplet with first tile
   const triIdx = findNInSorted(sorted, first, 3);
-  if (triIdx !== -1) {
+  if (triIdx.length === 3) {
     const rem = removeIndices(sorted, triIdx);
-    melds.push({ type: "tri", tiles: [first, first, first] });
+    melds.push({ type: "tri", tiles: [first, first, first], open: false });
     _decompose(rem, pair, melds, results);
     melds.pop();
   }
 
+  // Try sequence starting with first tile
   if (first.suit !== "honor" && first.num <= 7) {
     const second = { suit: first.suit, num: first.num + 1 };
     const third  = { suit: first.suit, num: first.num + 2 };
@@ -67,17 +69,25 @@ function _decompose(tiles, pair, melds, results) {
     const i3 = findInSorted(sorted, third, 1);
     if (i2 !== -1 && i3 !== -1) {
       const rem = removeIndices(sorted, [0, i2, i3]);
-      melds.push({ type: "seq", tiles: [first, second, third] });
+      melds.push({ type: "seq", tiles: [first, second, third], open: false });
       _decompose(rem, pair, melds, results);
       melds.pop();
     }
   }
 
+  // Try pair — iterate all unique tiles (not just first) to allow backtracking
   if (pair === null) {
-    const pairIdx = findNInSorted(sorted, first, 2);
-    if (pairIdx !== -1) {
-      const rem = removeIndices(sorted, pairIdx);
-      _decompose(rem, { tiles: [first, first] }, melds, results);
+    const tried = new Set();
+    for (let i = 0; i < sorted.length; i++) {
+      const candidate = sorted[i];
+      const ck = `${candidate.suit}|${candidate.num}`;
+      if (tried.has(ck)) continue;
+      tried.add(ck);
+      const pairIdx = findNInSorted(sorted, candidate, 2);
+      if (pairIdx.length === 2) {
+        const rem = removeIndices(sorted, pairIdx);
+        _decompose(rem, { tiles: [candidate, candidate] }, melds, results);
+      }
     }
   }
 }
@@ -92,7 +102,7 @@ function findNInSorted(sorted, tile, n) {
   const indices = [];
   for (let i = 0; i < sorted.length && indices.length < n; i++)
     if (tilesEqual(sorted[i], tile)) indices.push(i);
-  return indices.length === n ? indices : -1;
+  return indices.length === n ? indices : [];
 }
 function findInSorted(sorted, tile, skip = 0) {
   let found = 0;
@@ -125,7 +135,7 @@ function detectYaku(tiles, seatWind = "East", roundWind = "East") {
 
   if (isTanyao(tiles)) found.push("All Simples");
   if (isToitoi(best)) found.push("All Triplets");
-  if (isPinfu(best)) found.push("Pinfu");
+  if (isPinfu(best, seatWind, roundWind)) found.push("Pinfu");
   if (isIipeiko(best)) found.push("Twin Sequences");
   if (isRyanpeikou(best)) found.push("Double Twin Sequences");
   if (isSanshokuDoujun(best)) found.push("Three Suit Sequences");
@@ -192,12 +202,24 @@ function isSevenPairs(tiles) {
 }
 function isTanyao(tiles) { return tiles.every(t => !isTerminalOrHonor(t.suit, t.num)); }
 function isToitoi(d) { return d.melds.every(m => m.type === "tri" || m.type === "kan"); }
-function isPinfu(d) {
+function isPinfu(d, seatWind, roundWind) {
   if (!d.pair) return false;
   const p = d.pair.tiles[0];
   if (isHonor(p.suit)) return false;
-  if (DRAGONS.includes(HONORS[p.num-1])) return false;
-  return d.melds.every(m => m.type === "seq");
+  const pairName = HONORS[p.num - 1];
+  // Reject dragon pairs
+  if (DRAGONS.includes(pairName)) return false;
+  // Reject seat or round wind pairs
+  if (pairName === seatWind || pairName === roundWind) return false;
+  // All melds must be sequences
+  if (!d.melds.every(m => m.type === "seq")) return false;
+  // Must have at least one ryanmen (two-sided) wait among the sequences
+  // A sequence has a ryanmen wait if neither end tile is 1 or 9
+  return d.melds.some(m => {
+    const lo = m.tiles[0].num;
+    const hi = m.tiles[2].num;
+    return lo !== 1 && hi !== 9;
+  });
 }
 function isIipeiko(d) {
   const s = d.melds.filter(m => m.type === "seq");
@@ -261,7 +283,7 @@ function isChiniiSou(tiles) {
   const s = new Set(tiles.map(t => t.suit));
   return s.size===1 && (s.has("man")||s.has("pin")||s.has("sou"));
 }
-function isSanankou(d) { return d.melds.filter(m => m.type==="tri").length >= 3; }
+function isSanankou(d) { return d.melds.filter(m => m.type === "tri" && !m.open).length >= 3; }
 function isShousangen(d) {
   const dn = [5,6,7];
   const dt = d.melds.filter(m => m.type==="tri" && m.tiles[0].suit==="honor" && dn.includes(m.tiles[0].num));
@@ -287,24 +309,38 @@ function isRyuuiisou(tiles) {
   return tiles.every(t => g.has(tileKey(t.suit,t.num)));
 }
 function isNineGates(tiles) {
-  if (tiles.length < 13) return false;
+  if (tiles.length !== 14) return false;
   const s = new Set(tiles.map(t => t.suit));
-  if (s.size!==1||s.has("honor")) return false;
-  const base=[1,1,1,2,3,4,5,6,7,8,9,9,9];
-  const bc={};
-  for (const n of base) bc[n]=(bc[n]||0)+1;
-  for (const t of tiles) { if ((bc[t.num]||0)===0) return false; bc[t.num]--; }
-  return Object.values(bc).every(v => v<=0);
+  if (s.size !== 1 || s.has("honor")) return false;
+  // Build hand counts
+  const counts = {};
+  for (const t of tiles) counts[t.num] = (counts[t.num] || 0) + 1;
+  // Base pattern requires: 1×3, 2-8×1, 9×3
+  const base = { 1: 3, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 3 };
+  let extras = 0;
+  for (let n = 1; n <= 9; n++) {
+    const have = counts[n] || 0;
+    const need = base[n] || 0;
+    if (have < need) return false;
+    extras += have - need;
+  }
+  return extras === 1;
 }
-function isSuukantsu(d) { return d.melds.filter(m => m.type==="kan").length===4; }
+// Note: isSuukantsu requires kan-type melds which the decomposer doesn't produce.
+// Kan declarations would need to be tracked separately in the game state.
+function isSuukantsu(d) { return d.melds.filter(m => m.type === "kan").length === 4; }
+
 
 // ─── Tenpai ───────────────────────────────────────────────────────────────────
 function getTenpaiTiles(tiles, sw, rw) {
   if (tiles.length !== 13) return [];
   const all = [];
-  for (const suit of SUITS) for (let n=1;n<=9;n++) all.push({suit,num:n});
-  for (let n=1;n<=7;n++) all.push({suit:"honor",num:n});
+  for (const suit of SUITS) for (let n = 1; n <= 9; n++) all.push({ suit, num: n });
+  for (let n = 1; n <= 7; n++) all.push({ suit: "honor", num: n });
   return all.filter(c => {
+    // Can't draw a 5th copy — only 4 of each tile exist
+    const alreadyHeld = tiles.filter(t => tilesEqual(t, c)).length;
+    if (alreadyHeld >= 4) return false;
     const test = [...tiles, c];
     const yaku = detectYaku(test, sw, rw);
     return yaku.length > 0 || isValidWinningHand(test);
@@ -318,24 +354,53 @@ function isValidWinningHand(tiles) {
 }
 
 // ─── Fu Calculation ───────────────────────────────────────────────────────────
-function calcFu(decomp, seatWind, roundWind, winType="ron") {
+function calcFu(decomp, seatWind, roundWind, winType = "ron", isClosed = true) {
   if (!decomp || !decomp.pair) return 30;
-  let fu = winType==="tsumo" ? 20 : 30;
 
+  // Base fu: tsumo starts at 20, ron at 30
+  let fu = winType === "tsumo" ? 20 : 30;
+
+  // Tsumo bonus (+2 fu) — applies to all tsumo wins except pinfu
+  if (winType === "tsumo") fu += 2;
+
+  // Pair fu
   const pt = decomp.pair.tiles[0];
-  if (pt.suit==="honor") {
-    const hn = HONORS[pt.num-1];
-    if (DRAGONS.includes(hn) || hn===seatWind || hn===roundWind) fu += 2;
+  if (pt.suit === "honor") {
+    const hn = HONORS[pt.num - 1];
+    if (DRAGONS.includes(hn) || hn === seatWind || hn === roundWind) fu += 2;
   }
 
+  // Meld fu
   for (const meld of decomp.melds) {
-    if (meld.type==="seq") continue;
+    if (meld.type === "seq") continue;
     const t = meld.tiles[0];
-    const isTerm = isTerminal(t.suit,t.num) || t.suit==="honor";
-    const base = isTerm ? 8 : 4;
-    fu += base * (meld.type==="kan" ? 4 : 1);
+    const isTerm = isTerminal(t.suit, t.num) || t.suit === "honor";
+    const isOpen = meld.open === true;
+    if (meld.type === "kan") {
+      // Closed kan: simple=16, terminal/honor=32; Open kan: simple=8, terminal/honor=16
+      fu += isTerm ? (isOpen ? 16 : 32) : (isOpen ? 8 : 16);
+    } else {
+      // Triplet (pon): closed simple=4, closed term/honor=8; open: halved
+      const base = isTerm ? 8 : 4;
+      fu += isOpen ? base / 2 : base;
+    }
   }
-  return Math.ceil(fu/10)*10;
+
+  // Wait-type fu — examine sequences for penchan/kanchan
+  // We approximate from the decomposition: if a sequence's low tile is 1 (1-2-3 edge wait)
+  // or high tile is 9 (7-8-9 edge wait), that's +2 penchan.
+  // Kanchan would show as a middle tile being the wait — harder to detect post-decomposition
+  // without tracking the winning tile, so we conservatively add wait fu for edge waits only.
+  // Tanki (pair wait) is +2 fu — approximated as +2 when no sequence provides a two-sided wait.
+  const hasRyanmen = decomp.melds.some(m => {
+    if (m.type !== "seq") return false;
+    return m.tiles[0].num !== 1 && m.tiles[2].num !== 9;
+  });
+  if (!hasRyanmen && decomp.melds.some(m => m.type === "seq")) {
+    fu += 2; // penchan or kanchan
+  }
+
+  return Math.ceil(fu / 10) * 10;
 }
 
 // ─── Dora ─────────────────────────────────────────────────────────────────────
@@ -446,9 +511,13 @@ function yakuProximity(name, tiles, sw, rw) {
     case "Seven Pairs": return sevenPairsShanten(tiles);
     case "All Simples": return standardShanten(tiles)+tiles.filter(t=>isTerminalOrHonor(t.suit,t.num)).length;
     case "All Triplets": {
-      const c=countMap(tiles); let trips=0,pairs=0;
-      for(const v of Object.values(c)){if(v>=3)trips++;else if(v>=2)pairs++;}
-      return Math.max(0,8-2*trips-pairs);
+      // Need 4 triplets + 1 pair = 14 tiles total
+      const c = countMap(tiles); let trips = 0, pairs = 0;
+      for (const v of Object.values(c)) { if (v >= 3) trips++; else if (v >= 2) pairs++; }
+      // Need 4 triplets and a pair; pair can come from leftover after 4 triplets
+      const needTrips = Math.max(0, 4 - trips);
+      const hasPair = pairs > 0 || trips > 4;
+      return Math.max(0, needTrips * 2 + (hasPair ? 0 : 1));
     }
     case "Pinfu": {
       const c=countMap(tiles);
@@ -495,18 +564,37 @@ function yakuProximity(name, tiles, sw, rw) {
       return Math.max(0,[1,2,3,4].reduce((a,n)=>a+Math.max(0,3-(c[n]||0)),0)+standardShanten(tiles));
     }
     case "Four Little Winds": {
-      const c={};tiles.filter(t=>t.suit==="honor"&&[1,2,3,4].includes(t.num)).forEach(t=>c[t.num]=(c[t.num]||0)+1);
-      const sorted=Object.entries(c).sort((a,b)=>b[1]-a[1]);
-      let need=0,tn=3;
-      for(const[,v] of sorted){if(tn>0){need+=Math.max(0,3-v);tn--;}else{need+=Math.max(0,2-v);break;}}
-      need+=[1,2,3,4].filter(n=>!c[n]).length*3;
-      return Math.max(0,need+standardShanten(tiles));
+      // Need 3 wind triplets + 1 wind pair
+      const c = {};
+      tiles.filter(t => t.suit === "honor" && [1,2,3,4].includes(t.num))
+           .forEach(t => c[t.num] = (c[t.num] || 0) + 1);
+      // Try each wind as the pair candidate; pick the one with minimum tiles needed
+      let best = 99;
+      for (const pairWind of [1,2,3,4]) {
+        let need = 0;
+        for (const w of [1,2,3,4]) {
+          const have = c[w] || 0;
+          need += w === pairWind ? Math.max(0, 2 - have) : Math.max(0, 3 - have);
+        }
+        best = Math.min(best, need);
+      }
+      return Math.max(0, best + standardShanten(tiles));
     }
     case "Three Little Dragons": {
-      const c={};tiles.filter(t=>t.suit==="honor"&&[5,6,7].includes(t.num)).forEach(t=>c[t.num]=(c[t.num]||0)+1);
-      let need=0;
-      [5,6,7].forEach((n,i)=>{const v=c[n]||0;need+=i<2?Math.max(0,3-v):Math.max(0,2-v);});
-      return Math.max(0,need+standardShanten(tiles));
+      // Need 2 dragon triplets + 1 dragon pair — any dragon can be the pair
+      const c = {};
+      tiles.filter(t => t.suit === "honor" && [5,6,7].includes(t.num))
+           .forEach(t => c[t.num] = (c[t.num] || 0) + 1);
+      let best = 99;
+      for (const pairDragon of [5,6,7]) {
+        let need = 0;
+        for (const d of [5,6,7]) {
+          const have = c[d] || 0;
+          need += d === pairDragon ? Math.max(0, 2 - have) : Math.max(0, 3 - have);
+        }
+        best = Math.min(best, need);
+      }
+      return Math.max(0, best + standardShanten(tiles));
     }
     case "Straight": {
       let best=99;
@@ -525,13 +613,46 @@ function yakuProximity(name, tiles, sw, rw) {
       for(let n=1;n<=9;n++){let need=0;for(const suit of SUITS){need+=Math.max(0,3-tiles.filter(t=>t.suit===suit&&t.num===n).length);}best=Math.min(best,need+standardShanten(tiles));}
       return Math.max(0,best);
     }
+    case "Three Concealed Triplets": {
+      // Need 3 sets of 3 identical tiles (concealed)
+      const c = countMap(tiles);
+      let trips = 0, pairs = 0;
+      for (const v of Object.values(c)) {
+        if (v >= 3) trips++;
+        else if (v >= 2) pairs++;
+      }
+      const need = Math.max(0, 3 - trips);
+      // Each missing triplet needs: 2 more tiles if we have a pair, 3 if we have nothing
+      // Approximate: pairs can become trips with 1 tile, singletons need 2
+      const pairsAvail = Math.min(pairs, need);
+      return Math.max(0, pairsAvail * 1 + (need - pairsAvail) * 2 + standardShanten(tiles));
+    }
+    case "Double Twin Sequences": {
+      // Need two pairs of identical sequences
+      let best = 99;
+      for (const suit of SUITS) {
+        for (let s1 = 1; s1 <= 7; s1++) {
+          for (let s2 = s1; s2 <= 7; s2++) {
+            const seq1 = [s1, s1+1, s1+2].map(n => ({ suit, num: n }));
+            const seq2 = [s2, s2+1, s2+2].map(n => ({ suit, num: n }));
+            const need1 = 3 - overlapCount(tiles, seq1);
+            const need2 = s2 === s1
+              ? Math.max(0, 6 - tiles.filter(t => t.suit === suit && t.num >= s1 && t.num <= s1+2).length)
+              : 3 - overlapCount(tiles, seq2);
+            best = Math.min(best, need1 + (s2 === s1 ? need2 : 3 - overlapCount(tiles, seq2)) + standardShanten(tiles));
+          }
+        }
+      }
+      return Math.max(0, best);
+    }
     default: return standardShanten(tiles);
   }
 }
 
 function buildProximityList(sw, rw) {
   const base = [
-    "Seven Pairs","All Simples","Pinfu","Twin Sequences","All Triplets",
+    "Seven Pairs","All Simples","Pinfu","Twin Sequences","Double Twin Sequences","All Triplets",
+    "Three Concealed Triplets",
     "Half Flush","Full Flush","Half Outside Hand","Full Outside Hand",
     "Straight","Three Suit Sequences","Three Suit Triplets",
     "All Honors","All Terminals","All Green","Nine Gates","Thirteen Orphans",
@@ -621,7 +742,7 @@ function formatPts(pts) {
 function getScoreDisplay(info, isClosed) {
   const han = isClosed ? info.hanClosed : info.hanOpen;
   if (han===null) return null;
-  if (info.yakuman) return { label:"Yakuman", nonDealerRon:"32,000", dealerRon:"48,000", han:"役満", color:"#e84393" };
+  if (info.yakuman) return { label:"Yakuman", nonDealerRon: formatPts(32000), dealerRon: formatPts(48000), han:"役満", color:"#e84393" };
   const pts = hanToPoints(han);
   return { label:pts.label, han, nonDealerRon:formatPts(pts.nonDealerRon), dealerRon:formatPts(pts.dealerRon),
            color: pts.label==="Mangan"?"#fdcb6e":pts.label?"#e84393":null };
@@ -814,10 +935,11 @@ function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggle
 
 // Score summary panel — shown when yaku detected
 function ScoreSummary({ detectedYaku, doraCount, fu, isClosed }) {
-  const totalHan = detectedYaku.reduce((s,y)=>s+getYakuHan(y,isClosed),0)+doraCount;
-  const isYakuman = detectedYaku.some(y=>(YAKU_INFO[y]||{}).yakuman);
-  const pts = isYakuman ? YAKUMAN_PTS : (totalHan>0 ? hanToPoints(totalHan,fu) : null);
-  if (totalHan===0 && doraCount===0) return null;
+  const isYakuman = detectedYaku.some(y => (YAKU_INFO[y] || {}).yakuman);
+  const baseHan = detectedYaku.reduce((s, y) => s + getYakuHan(y, isClosed), 0);
+  const totalHan = isYakuman ? baseHan : baseHan + doraCount;
+  const pts = isYakuman ? YAKUMAN_PTS : (totalHan > 0 ? hanToPoints(totalHan, fu) : null);
+  if (totalHan === 0 && doraCount === 0) return null;
 
   const lc = pts?.label==="Mangan"?"#fdcb6e":pts?.label?"#e84393":"var(--accent2)";
   return (
@@ -973,11 +1095,11 @@ function RiichiAnalyzer() {
   const runAnalysis = useCallback((tiles, sw, rw) => {
     setDetected(detectYaku(tiles, sw, rw));
     setProximity(scoreAllYaku(tiles, sw, rw));
-    setTenpai(tiles.length===13 ? getTenpaiTiles(tiles, sw, rw) : []);
+    setTenpai(tiles.length === 13 ? getTenpaiTiles(tiles, sw, rw) : []);
   }, []);
 
   const addTile = useCallback((suit, num) => {
-    if (hand.length>=13) return;
+    if (hand.length >= 14) return;
     const newHand = [...hand,{suit,num}].sort(tileSort);
     setHand(newHand);
     runAnalysis(newHand, seatWind, roundWind);
@@ -998,12 +1120,12 @@ function RiichiAnalyzer() {
   const doraCount = useMemo(()=>countDora(hand, doraIndicators, redFives), [hand, doraIndicators, redFives]);
 
   const fu = useMemo(() => {
-    if (hand.length<13) return 30;
+    if (hand.length < 14) return 30;
     const decomps = decompose([...hand]);
-    const valid = decomps.filter(d=>d.pair&&d.melds.length===4);
+    const valid = decomps.filter(d => d.pair && d.melds.length === 4);
     if (!valid.length) return 30;
-    return calcFu(valid[0], seatWind, roundWind);
-  }, [hand, seatWind, roundWind]);
+    return calcFu(valid[0], seatWind, roundWind, "ron", isClosed);
+  }, [hand, seatWind, roundWind, isClosed]);
 
   const proxFiltered = useMemo(() => {
     let list = openFilter
@@ -1074,7 +1196,7 @@ function RiichiAnalyzer() {
           <div className="main-panel">
             <div className="hand-area">
               <div className="hand-header">
-                <div className="section-label" style={{marginBottom:0}}>Your Hand ({hand.length}/13)</div>
+                <div className="section-label" style={{marginBottom:0}}>Your Hand ({hand.length}/14)</div>
                 <div style={{display:"flex",gap:7,alignItems:"center"}}>
                   <button onClick={()=>setIsClosed(v=>!v)} style={{
                     padding:"4px 11px",borderRadius:12,cursor:"pointer",
@@ -1093,7 +1215,7 @@ function RiichiAnalyzer() {
                     <MahjongTile key={i} suit={t.suit} num={t.num} selected onClick={()=>removeTile(i)}/>
                   ))
                 }
-                {hand.length>0 && Array.from({length:13-hand.length}).map((_,i)=>(
+                {hand.length>0 && Array.from({length:14-hand.length}).map((_,i)=>(
                   <div key={i} className="hand-empty-slot"/>
                 ))}
               </div>
