@@ -7,10 +7,10 @@ const WINDS = ["East", "South", "West", "North"];
 const DRAGONS = ["Haku", "Hatsu", "Chun"];
 
 const TILE_UNICODE = {
-  man1:"🀇",man2:"🀈",man3:"🀉",man4:"🀊",man5:"🀋",man6:"🀌",man7:"🀍",man8:"🀎",man9:"🀏",
-  pin1:"🀙",pin2:"🀚",pin3:"🀛",pin4:"🀜",pin5:"🀝",pin6:"🀞",pin7:"🀟",pin8:"🀠",pin9:"🀡",
-  sou1:"🀐",sou2:"🀑",sou3:"🀒",sou4:"🀓",sou5:"🀔",sou6:"🀕",sou7:"🀖",sou8:"🀗",sou9:"🀘",
-  East:"🀀",South:"🀁",West:"🀂",North:"🀃",Haku:"🀆",Hatsu:"🀅",Chun:"🀄",
+  man1: "./assets/numbers1.png", man2: "./assets/numbers2.png", man3: "./assets/numbers3.png", man4: "./assets/numbers4.png", man5: "./assets/numbers5.png", man6: "./assets/numbers6.png", man7: "./assets/numbers7.png", man8: "./assets/numbers8.png", man9: "./assets/numbers9.png",
+  pin1: "./assets/dots1.png", pin2: "./assets/dots2.png", pin3: "./assets/dots3.png", pin4: "./assets/dots4.png", pin5: "./assets/dots5.png", pin6: "./assets/dots6.png", pin7: "./assets/dots7.png", pin8: "./assets/dots8.png", pin9: "./assets/dots9.png",
+  sou1: "./assets/bamboo1.png", sou2: "./assets/bamboo2.png", sou3: "./assets/bamboo3.png", sou4: "./assets/bamboo4.png", sou5: "./assets/bamboo5.png", sou6: "./assets/bamboo6.png", sou7: "./assets/bamboo7.png", sou8: "./assets/bamboo8.png", sou9: "./assets/bamboo9.png",
+  East: "./assets/winds_east.png", South: "./assets/winds_south.png", West: "./assets/winds_west.png", North: "./assets/winds_north.png", Haku: "./assets/dragons_white.png", Hatsu: "./assets/dragons_green.png", Chun: "./assets/dragons_red.png",
 };
 
 const TILE_COLORS = {
@@ -504,7 +504,9 @@ function yakuProximity(name, tiles, sw, rw) {
     if (targetNum===null) for (const [d,n] of Object.entries(dragonNums)) if(name.includes(d)){targetNum=n;break;}
     if (targetNum===null) return 99;
     const have=tiles.filter(t=>t.suit==="honor"&&t.num===targetNum).length;
-    return Math.max(0,Math.max(0,3-have)+standardShanten(tiles));
+    // Proximity = tiles still needed to complete the triplet only.
+    // The rest of the hand is unconstrained, so we don't add whole-hand shanten.
+    return Math.max(0, 3 - have);
   }
   switch(name) {
     case "Thirteen Orphans": return thirteenOrphansShanten(tiles);
@@ -524,10 +526,26 @@ function yakuProximity(name, tiles, sw, rw) {
       return standardShanten(tiles)+Math.floor(Object.values(c).filter(v=>v>=3).length/2)+Math.floor(tiles.filter(t=>isHonor(t.suit)).length/3);
     }
     case "Twin Sequences": {
-      const sg={};
-      for(const suit of SUITS) for(let s=1;s<=7;s++) sg[`${suit}${s}`]=overlapCount(tiles,[s,s+1,s+2].map(n=>({suit,num:n})));
-      const sv=Object.values(sg).sort((a,b)=>b-a);
-      return Math.max(0,6-(sv[0]||0)*2+standardShanten(tiles));
+      // Need two copies of the same sequence, plus a valid hand around them.
+      // For each candidate sequence, count how many tiles of it we already have (capped at 6 for two copies).
+      // Cost = tiles still needed for the two copies + shanten of remaining tiles.
+      let best = 99;
+      for (const suit of SUITS) {
+        for (let s = 1; s <= 7; s++) {
+          const seq = [s, s+1, s+2].map(n => ({ suit, num: n }));
+          // Count how many of the 6 tiles (2x seq) we have
+          const pool = [...tiles];
+          let have = 0;
+          for (const t of [...seq, ...seq]) {
+            const i = pool.findIndex(p => tilesEqual(p, t));
+            if (i !== -1) { pool.splice(i, 1); have++; }
+          }
+          const need = 6 - have;
+          const rem = pool; // tiles not used by the two sequences
+          best = Math.min(best, need + standardShanten(rem));
+        }
+      }
+      return Math.max(0, best);
     }
     case "Half Flush": {
       let best=99;
@@ -604,9 +622,25 @@ function yakuProximity(name, tiles, sw, rw) {
     case "Half Outside Hand": return Math.max(0,standardShanten(tiles)+Math.floor(tiles.filter(t=>!isTerminalOrHonor(t.suit,t.num)).length/3));
     case "Full Outside Hand": return Math.max(0,standardShanten(tiles)+Math.floor(tiles.filter(t=>!isTerminal(t.suit,t.num)).length/3));
     case "Three Suit Sequences": {
-      let best=99;
-      for(let s=1;s<=7;s++){let need=0;for(const suit of SUITS){need+=3-overlapCount(tiles,[s,s+1,s+2].map(n=>({suit,num:n})));}best=Math.min(best,need+standardShanten(tiles));}
-      return Math.max(0,best);
+      // Need the same sequence (same starting number) in all three suits, plus a pair.
+      let best = 99;
+      for (let s = 1; s <= 7; s++) {
+        const pool = [...tiles];
+        let have = 0;
+        for (const suit of SUITS) {
+          for (const n of [s, s+1, s+2]) {
+            const i = pool.findIndex(p => p.suit === suit && p.num === n);
+            if (i !== -1) { pool.splice(i, 1); have++; }
+          }
+        }
+        const need = 9 - have; // 3 sequences × 3 tiles
+        const rem = pool;
+        const pairShanten = rem.length >= 2
+          ? (Object.values(countMap(rem)).some(v => v >= 2) ? 0 : 1)
+          : 1;
+        best = Math.min(best, need + pairShanten);
+      }
+      return Math.max(0, best);
     }
     case "Three Suit Triplets": {
       let best=99;
@@ -628,18 +662,29 @@ function yakuProximity(name, tiles, sw, rw) {
       return Math.max(0, pairsAvail * 1 + (need - pairsAvail) * 2 + standardShanten(tiles));
     }
     case "Double Twin Sequences": {
-      // Need two pairs of identical sequences
+      // Need two pairs of identical sequences (4 melds total), each pair being the same sequence.
+      // Try every combination of two sequence types (same suit, can be same or different starting num).
       let best = 99;
       for (const suit of SUITS) {
         for (let s1 = 1; s1 <= 7; s1++) {
           for (let s2 = s1; s2 <= 7; s2++) {
             const seq1 = [s1, s1+1, s1+2].map(n => ({ suit, num: n }));
             const seq2 = [s2, s2+1, s2+2].map(n => ({ suit, num: n }));
-            const need1 = 3 - overlapCount(tiles, seq1);
-            const need2 = s2 === s1
-              ? Math.max(0, 6 - tiles.filter(t => t.suit === suit && t.num >= s1 && t.num <= s1+2).length)
-              : 3 - overlapCount(tiles, seq2);
-            best = Math.min(best, need1 + (s2 === s1 ? need2 : 3 - overlapCount(tiles, seq2)) + standardShanten(tiles));
+            // Count tiles for 2x seq1 + 2x seq2 (12 tiles total)
+            const pool = [...tiles];
+            let have = 0;
+            const want = [...seq1, ...seq1, ...seq2, ...seq2];
+            for (const t of want) {
+              const i = pool.findIndex(p => tilesEqual(p, t));
+              if (i !== -1) { pool.splice(i, 1); have++; }
+            }
+            const need = want.length - have;
+            // Remaining tiles must form a pair (2 tiles); approximate with what's left
+            const rem = pool;
+            const pairShanten = rem.length >= 2
+              ? (Object.values(countMap(rem)).some(v => v >= 2) ? 0 : 1)
+              : 1;
+            best = Math.min(best, need + pairShanten);
           }
         }
       }
@@ -762,10 +807,9 @@ const FREQ_COLORS = {
 
 function MahjongTile({ suit, num, selected, onClick, small, isDora }) {
   const key = tileKey(suit, num);
-  const emoji = TILE_UNICODE[key];
+  const src = TILE_UNICODE[key];
   const color = TILE_COLORS[suit] || TILE_COLORS.honor;
-  const bg = TILE_BG[suit] || TILE_BG.honor;
-  const size = small ? 30 : 38;
+  const imgSize = small ? 36 : 48;
 
   return (
     <button
@@ -773,22 +817,16 @@ function MahjongTile({ suit, num, selected, onClick, small, isDora }) {
       disabled={!onClick}
       className="tile-btn"
       style={{
-        width: size, height: size+10, fontSize: small ? 26 : 34,
-        border: selected ? `2px solid ${color}` : isDora ? `2px solid #ffd166` : `1px solid ${color}55`,
-        background: selected ? `${color}28` : bg,
-        boxShadow: selected
-          ? `0 0 10px ${color}55, inset 0 1px 0 ${color}44`
-          : isDora ? `0 0 8px #ffd16655`
-          : `inset 0 1px 0 rgba(255,255,255,0.05)`,
+        width: imgSize, height: imgSize,
+        border: selected ? `2px solid ${color}` : isDora ? `2px solid #ffd166` : `2px solid transparent`,
+        background: "none",
+        boxShadow: selected ? `0 0 10px ${color}55` : isDora ? `0 0 8px #ffd16655` : "none",
+        borderRadius: 4,
+        padding: 0,
       }}
       title={tileLabel(suit, num)}
     >
-      <span className="tile-emoji">{emoji}</span>
-      {!small && (
-        <span className="tile-label-small" style={{ color, fontWeight:800, fontSize:8, opacity:1 }}>
-          {tileLabel(suit, num)}
-        </span>
-      )}
+      <img src={src} alt={key} style={{ width: imgSize, height: imgSize, objectFit: "contain", display: "block" }} />
     </button>
   );
 }
@@ -853,7 +891,7 @@ function WindPill({ label, value, options, onChange, color }) {
             color: value===opt ? color : "var(--text3)",
             cursor:"pointer", fontSize:10, fontWeight:700, fontFamily:"'Sora',sans-serif", transition:"all 0.15s",
           }}>
-            {TILE_UNICODE[opt]}{opt[0]}
+            {TILE_UNICODE[opt] && <img src={TILE_UNICODE[opt]} alt={opt} style={{width:12,height:12,objectFit:"contain",verticalAlign:"middle",marginRight:2}}/>}{opt[0]}
           </button>
         ))}
       </div>
@@ -897,20 +935,20 @@ function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggle
             <div key={suit} style={{display:"flex",gap:2,marginBottom:3}}>
               {[1,2,3,4,5,6,7,8,9].map(n=>(
                 <button key={n} onClick={()=>onAddDora({suit,num:n})} style={{
-                  width:26,height:30,borderRadius:4,
-                  border:`1px solid ${TILE_COLORS[suit]}44`,
-                  background:TILE_BG[suit],cursor:"pointer",fontSize:20,padding:0,lineHeight:1,
-                }}>{TILE_UNICODE[`${suit}${n}`]}</button>
+                  width:36,height:36,borderRadius:4,
+                  border:"2px solid transparent",
+                  background:"none",cursor:"pointer",padding:0,lineHeight:1,
+                }}><img src={TILE_UNICODE[`${suit}${n}`]} alt={`${suit}${n}`} style={{width:36,height:36,objectFit:"contain"}}/></button>
               ))}
             </div>
           ))}
           <div style={{display:"flex",gap:2}}>
             {[1,2,3,4,5,6,7].map(n=>(
               <button key={n} onClick={()=>onAddDora({suit:"honor",num:n})} style={{
-                width:26,height:30,borderRadius:4,
-                border:`1px solid ${TILE_COLORS.honor}44`,
-                background:TILE_BG.honor,cursor:"pointer",fontSize:20,padding:0,lineHeight:1,
-              }}>{TILE_UNICODE[HONORS[n-1]]}</button>
+                width:36,height:36,borderRadius:4,
+                border:"2px solid transparent",
+                background:"none",cursor:"pointer",padding:0,lineHeight:1,
+              }}><img src={TILE_UNICODE[HONORS[n-1]]} alt={HONORS[n-1]} style={{width:36,height:36,objectFit:"contain"}}/></button>
             ))}
           </div>
         </div>
@@ -1178,8 +1216,8 @@ function RiichiAnalyzer() {
                 <WindPill label="Round Wind" value={roundWind} options={WINDS} onChange={handleRound} color="#3b9eff"/>
               </div>
               <div style={{marginTop:8,fontSize:9,color:"var(--text3)"}}>
-                Seat: <span style={{color:"#b09fff"}}>{TILE_UNICODE[seatWind]} {seatWind}</span>
-                {" · "}Round: <span style={{color:"#3b9eff"}}>{TILE_UNICODE[roundWind]} {roundWind}</span>
+                Seat: <span style={{color:"#b09fff"}}><img src={TILE_UNICODE[seatWind]} alt={seatWind} style={{width:12,height:12,objectFit:"contain",verticalAlign:"middle"}}/> {seatWind}</span>
+                {" · "}Round: <span style={{color:"#3b9eff"}}><img src={TILE_UNICODE[roundWind]} alt={roundWind} style={{width:12,height:12,objectFit:"contain",verticalAlign:"middle"}}/> {roundWind}</span>
               </div>
             </div>
 

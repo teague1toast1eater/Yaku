@@ -1,4 +1,4 @@
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --bg: #0a0a14; --surface: rgba(255,255,255,0.045); --surface2: rgba(255,255,255,0.075);
       --border: rgba(255,255,255,0.09); --border2: rgba(255,255,255,0.14);
@@ -49,6 +49,7 @@
     .section-label { font-size: 9px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; font-family: 'Space Mono', monospace; }
     .suit-section { margin-bottom: 10px; }
     .suit-label { font-size: 10px; color: var(--text3); margin-bottom: 5px; font-weight: 600; }
+    .tile { font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji"; }
     .tile-row { display: flex; gap: 3px; }
     .tile-btn {
       position: relative; display: flex; flex-direction: column; align-items: center;
@@ -124,4 +125,3 @@
       .app-header { padding: 10px 12px; gap: 10px; }
       .sidebar, .hand-area, .analysis-area { padding: 10px; }
     }
-  
