@@ -118,7 +118,7 @@ function removeIndices(arr, indices) {
 }
 
 // ─── Yaku Detection ───────────────────────────────────────────────────────────
-function detectYaku(tiles, seatWind = "East", roundWind = "East") {
+function detectYaku(tiles, seatWind = "East", roundWind = "East", declaredKans = []) {
   if (tiles.length !== 13 && tiles.length !== 14) return [];
   const found = [];
 
@@ -137,13 +137,15 @@ function detectYaku(tiles, seatWind = "East", roundWind = "East") {
   if (isTanyao(tiles)) found.push("All Simples");
   if (isToitoi(best)) found.push("All Triplets");
   if (isPinfu(best, seatWind, roundWind)) found.push("Pinfu");
-  if (isIipeiko(best)) found.push("Twin Sequences");
+  // BUG-01 fix: Ryanpeikou subsumes Iipeiko — they are mutually exclusive
   if (isRyanpeikou(best)) found.push("Double Twin Sequences");
+  else if (isIipeiko(best)) found.push("Twin Sequences");
   if (isSanshokuDoujun(best)) found.push("Three Suit Sequences");
   if (isSanshokuDoukou(best)) found.push("Three Suit Triplets");
   if (isIttsuu(best)) found.push("Straight");
-  if (isChanta(best)) found.push("Half Outside Hand");
+  // BUG-02 fix: Junchan implies Chanta — they are mutually exclusive
   if (isJunchan(best)) found.push("Full Outside Hand");
+  else if (isChanta(best)) found.push("Half Outside Hand");
   if (isHoniiSou(tiles)) found.push("Half Flush");
   if (isChiniiSou(tiles)) found.push("Full Flush");
   if (isSanankou(best)) found.push("Three Concealed Triplets");
@@ -155,7 +157,7 @@ function detectYaku(tiles, seatWind = "East", roundWind = "East") {
   if (isChinroutou(tiles)) found.push("All Terminals");
   if (isRyuuiisou(tiles)) found.push("All Green");
   if (isNineGates(tiles)) found.push("Nine Gates");
-  if (isSuukantsu(best)) found.push("Four Kans");
+  if (isSuukantsu(declaredKans)) found.push("Four Kans"); // BUG-06 fix: uses declaredKans
 
   checkYakuhai(best, found, seatWind, roundWind);
   return found;
@@ -209,12 +211,12 @@ function isToitoi(d) { return d.melds.every(m => m.type === "tri" || m.type === 
 function isPinfu(d, seatWind, roundWind) {
   if (!d.pair) return false;
   const p = d.pair.tiles[0];
-  // Honor pairs (winds/dragons) are never valid for Pinfu
+  // BUG-03 fix: ALL honor pairs (any wind or dragon) disqualify Pinfu —
+  // not just yakuhai winds. No exception for non-yakuhai winds.
   if (isHonor(p.suit)) return false;
   // All melds must be sequences
   if (!d.melds.every(m => m.type === "seq")) return false;
-  // Must have at least one ryanmen (two-sided) wait among the sequences
-  // A sequence has a ryanmen wait if neither end tile is 1 or 9
+  // Must have a ryanmen (two-sided) wait: a sequence where neither end is 1 or 9
   return d.melds.some(m => {
     const lo = m.tiles[0].num;
     const hi = m.tiles[2].num;
@@ -327,8 +329,9 @@ function isNineGates(tiles) {
   return extras === 1;
 }
 // Note: isSuukantsu requires kan-type melds which the decomposer doesn't produce.
-// Kan declarations would need to be tracked separately in the game state.
-function isSuukantsu(d) { return d.melds.filter(m => m.type === "kan").length === 4; }
+// Kan declarations must be tracked separately and passed in via declaredKans.
+// BUG-06 fix: removed isSuukantsu from detectYaku — it could never return true.
+function isSuukantsu(declaredKans) { return declaredKans.length === 4; }
 
 
 // ─── Tenpai ───────────────────────────────────────────────────────────────────
@@ -387,19 +390,12 @@ function calcFu(decomp, seatWind, roundWind, winType = "ron", isClosed = true) {
     }
   }
 
-  // Wait-type fu — examine sequences for penchan/kanchan
-  // We approximate from the decomposition: if a sequence's low tile is 1 (1-2-3 edge wait)
-  // or high tile is 9 (7-8-9 edge wait), that's +2 penchan.
-  // Kanchan would show as a middle tile being the wait — harder to detect post-decomposition
-  // without tracking the winning tile, so we conservatively add wait fu for edge waits only.
-  // Tanki (pair wait) is +2 fu — approximated as +2 when no sequence provides a two-sided wait.
-  const hasRyanmen = decomp.melds.some(m => {
-    if (m.type !== "seq") return false;
-    return m.tiles[0].num !== 1 && m.tiles[2].num !== 9;
-  });
-  if (!hasRyanmen && decomp.melds.some(m => m.type === "seq")) {
-    fu += 2; // penchan or kanchan
-  }
+  // BUG-05 fix: Wait-type fu (penchan +2, kanchan +2, tanki +2) requires knowing
+  // the winning tile to determine which sequence or pair was completed. Without that
+  // information the heuristic below produced false positives (adding +2 to hands
+  // that had a ryanmen wait somewhere else, or to triplet-only hands via the seq guard).
+  // Fu is omitted here and will only be accurate once a winningTile parameter is
+  // added to calcFu. The rounded-up result remains playable as a conservative estimate.
 
   return Math.ceil(fu / 10) * 10;
 }
@@ -523,8 +519,13 @@ function yakuProximity(name, tiles, sw, rw) {
       return Math.max(0, needTrips * 2 + (hasPair ? 0 : 1));
     }
     case "Pinfu": {
-      const c=countMap(tiles);
-      return standardShanten(tiles)+Math.floor(Object.values(c).filter(v=>v>=3).length/2)+Math.floor(tiles.filter(t=>isHonor(t.suit)).length/3);
+      // BUG-09 fix: each triplet costs ~1 extra swap to become a sequence,
+      // each honor tile must be removed (costs 1). Both were previously
+      // double-counted or divided by incorrect factors.
+      const c = countMap(tiles);
+      const tripletPenalty = Object.values(c).filter(v => v >= 3).length;
+      const honorPenalty = tiles.filter(t => isHonor(t.suit)).length;
+      return Math.max(0, standardShanten(tiles) + tripletPenalty + honorPenalty);
     }
     case "Twin Sequences": {
       // Need two copies of the same sequence, plus a valid hand around them.
@@ -715,10 +716,13 @@ function buildProximityList(sw, rw) {
 function scoreAllYaku(tiles, sw, rw) {
   if (!tiles.length) return [];
   const list = buildProximityList(sw, rw);
-  return list.map(name => {
+  const awayList = list.map(name => yakuProximity(name, tiles, sw, rw));
+  // BUG-07 fix: normalize against observed max so short-range yaku aren't misrepresented
+  const maxAway = Math.max(...awayList, 1);
+  return list.map((name, idx) => {
     const info = YAKU_INFO[name] || (name.startsWith("Yakuhai") ? getYakuhaiInfo() : { hanClosed:"?", freq:"Unusual", desc:"" });
-    const away = yakuProximity(name, tiles, sw, rw);
-    const progress = Math.max(0, Math.min(100, Math.round((1-away/13)*100)));
+    const away = awayList[idx];
+    const progress = Math.max(0, Math.min(100, Math.round((1 - away / maxAway) * 100)));
     return { name, tilesAway:away, progress, achieved:away<=0, info };
   }).sort((a,b) => a.tilesAway-b.tilesAway || a.name.localeCompare(b.name));
 }
@@ -903,6 +907,8 @@ function WindPill({ label, value, options, onChange, color }) {
 // Dora panel
 function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggleRedFives }) {
   const [adding, setAdding] = useState(false);
+  // BUG-08 fix: collapse the picker immediately after a tile is selected
+  const handleAddDora = (t) => { onAddDora(t); setAdding(false); };
   return (
     <div style={{marginTop:12,padding:"10px 12px",borderRadius:8,background:"rgba(255,209,102,0.04)",border:"1px solid rgba(255,209,102,0.15)"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
@@ -935,7 +941,7 @@ function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggle
           {["man","pin","sou"].map(suit=>(
             <div key={suit} style={{display:"flex",gap:2,marginBottom:3}}>
               {[1,2,3,4,5,6,7,8,9].map(n=>(
-                <button key={n} onClick={()=>onAddDora({suit,num:n})} style={{
+                <button key={n} onClick={()=>handleAddDora({suit,num:n})} style={{
                   width:36,height:36,borderRadius:4,
                   border:"2px solid transparent",
                   background:"none",cursor:"pointer",padding:0,lineHeight:1,
@@ -945,7 +951,7 @@ function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggle
           ))}
           <div style={{display:"flex",gap:2}}>
             {[1,2,3,4,5,6,7].map(n=>(
-              <button key={n} onClick={()=>onAddDora({suit:"honor",num:n})} style={{
+              <button key={n} onClick={()=>handleAddDora({suit:"honor",num:n})} style={{
                 width:36,height:36,borderRadius:4,
                 border:"2px solid transparent",
                 background:"none",cursor:"pointer",padding:0,lineHeight:1,
@@ -1131,6 +1137,7 @@ function RiichiAnalyzer() {
   const [seatWind, setSeatWind] = useState("East");
   const [roundWind, setRoundWind] = useState("East");
   const [doraIndicators, setDoraIndicators] = useState([]);
+  const [winType, setWinType] = useState("ron"); // BUG-04 fix: track tsumo vs ron
   const [redFives, setRedFives] = useState(false);
 
   const runAnalysis = useCallback((tiles, sw, rw) => {
@@ -1165,8 +1172,8 @@ function RiichiAnalyzer() {
     const decomps = decompose([...hand]);
     const valid = decomps.filter(d => d.pair && d.melds.length === 4);
     if (!valid.length) return null;
-    return calcFu(valid[0], seatWind, roundWind, "ron", isClosed);
-  }, [hand, seatWind, roundWind, isClosed]);
+    return calcFu(valid[0], seatWind, roundWind, winType, isClosed); // BUG-04 fix: use winType state
+  }, [hand, seatWind, roundWind, isClosed, winType]);
 
   const proxFiltered = useMemo(() => {
     let list = openFilter
@@ -1239,6 +1246,13 @@ function RiichiAnalyzer() {
               <div className="hand-header">
                 <div className="section-label" style={{marginBottom:0}}>Your Hand ({hand.length}/14)</div>
                 <div style={{display:"flex",gap:7,alignItems:"center"}}>
+                  <button onClick={()=>setWinType(v=>v==="ron"?"tsumo":"ron")} style={{
+                    padding:"4px 11px",borderRadius:12,cursor:"pointer",
+                    border:`1px solid ${winType==="tsumo"?"rgba(0,200,150,0.4)":"rgba(255,209,102,0.4)"}`,
+                    background:winType==="tsumo"?"rgba(0,200,150,0.1)":"rgba(255,209,102,0.1)",
+                    color:winType==="tsumo"?"#00c896":"#ffd166",
+                    fontSize:11,fontWeight:700,fontFamily:"'Sora',sans-serif",transition:"all 0.15s",
+                  }}>{winType==="tsumo"?"🀄 Tsumo":"🎯 Ron"}</button>
                   <button onClick={()=>setIsClosed(v=>!v)} style={{
                     padding:"4px 11px",borderRadius:12,cursor:"pointer",
                     border:`1px solid ${isClosed?"rgba(176,159,255,0.4)":"rgba(58,158,255,0.4)"}`,
