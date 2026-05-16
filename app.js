@@ -48,6 +48,7 @@ function decompose(tiles) {
 }
 
 function _decompose(tiles, pair, melds, results) {
+  if (results.length >= 32) return; // early exit — more than enough decompositions
   if (tiles.length === 0) { results.push({ pair, melds: [...melds] }); return; }
   const sorted = [...tiles].sort(tileSort);
   const first = sorted[0];
@@ -65,8 +66,8 @@ function _decompose(tiles, pair, melds, results) {
   if (first.suit !== "honor" && first.num <= 7) {
     const second = { suit: first.suit, num: first.num + 1 };
     const third  = { suit: first.suit, num: first.num + 2 };
-    const i2 = findInSorted(sorted, second, 1);
-    const i3 = findInSorted(sorted, third, 1);
+    const i2 = findInSorted(sorted, second, 0);
+    const i3 = findInSorted(sorted, third, 0);
     if (i2 !== -1 && i3 !== -1) {
       const rem = removeIndices(sorted, [0, i2, i3]);
       melds.push({ type: "seq", tiles: [first, second, third], open: false });
@@ -194,23 +195,22 @@ function isThirteenOrphans(tiles) {
   return true;
 }
 function isSevenPairs(tiles) {
-  if (tiles.length < 14) return false;
+  if (tiles.length < 13 || tiles.length > 14) return false;
   const c = {};
   for (const t of tiles) { const k = `${t.suit}|${t.num}`; c[k] = (c[k]||0)+1; }
   const v = Object.values(c);
-  return v.length === 7 && v.every(x => x === 2);
+  // 14 tiles: exactly 7 pairs
+  if (tiles.length === 14) return v.length === 7 && v.every(x => x === 2);
+  // 13 tiles: 6 complete pairs + 1 singleton (tenpai waiting on the 7th pair)
+  return v.filter(x => x >= 2).length === 6 && v.filter(x => x === 1).length === 1;
 }
 function isTanyao(tiles) { return tiles.every(t => !isTerminalOrHonor(t.suit, t.num)); }
 function isToitoi(d) { return d.melds.every(m => m.type === "tri" || m.type === "kan"); }
 function isPinfu(d, seatWind, roundWind) {
   if (!d.pair) return false;
   const p = d.pair.tiles[0];
+  // Honor pairs (winds/dragons) are never valid for Pinfu
   if (isHonor(p.suit)) return false;
-  const pairName = HONORS[p.num - 1];
-  // Reject dragon pairs
-  if (DRAGONS.includes(pairName)) return false;
-  // Reject seat or round wind pairs
-  if (pairName === seatWind || pairName === roundWind) return false;
   // All melds must be sequences
   if (!d.melds.every(m => m.type === "seq")) return false;
   // Must have at least one ryanmen (two-sided) wait among the sequences
@@ -361,7 +361,8 @@ function calcFu(decomp, seatWind, roundWind, winType = "ron", isClosed = true) {
   let fu = winType === "tsumo" ? 20 : 30;
 
   // Tsumo bonus (+2 fu) — applies to all tsumo wins except pinfu
-  if (winType === "tsumo") fu += 2;
+  const hasPinfu = isPinfu(decomp, seatWind, roundWind);
+  if (winType === "tsumo" && !hasPinfu) fu += 2;
 
   // Pair fu
   const pt = decomp.pair.tiles[0];
@@ -456,7 +457,7 @@ function shantenNoPair(tiles, hasPair) {
   for (const suit of ["man","pin","sou"]) { const [m,p]=countSuitMentsu(suits[suit]); mentsu+=m; partial+=p; }
   const hc={};
   for (const n of suits.honor) hc[n]=(hc[n]||0)+1;
-  for (const c of Object.values(hc)) { if(c>=3) mentsu++; else partial++; }
+  for (const c of Object.values(hc)) { if(c>=3) mentsu++; else if(c>=2) partial++; }
   if (mentsu+partial>4) partial=4-mentsu;
   return 8-2*mentsu-partial-(hasPair?1:0);
 }
@@ -976,7 +977,7 @@ function ScoreSummary({ detectedYaku, doraCount, fu, isClosed }) {
   const isYakuman = detectedYaku.some(y => (YAKU_INFO[y] || {}).yakuman);
   const baseHan = detectedYaku.reduce((s, y) => s + getYakuHan(y, isClosed), 0);
   const totalHan = isYakuman ? baseHan : baseHan + doraCount;
-  const pts = isYakuman ? YAKUMAN_PTS : (totalHan > 0 ? hanToPoints(totalHan, fu) : null);
+  const pts = isYakuman ? YAKUMAN_PTS : (totalHan > 0 ? hanToPoints(totalHan, fu ?? 30) : null);
   if (totalHan === 0 && doraCount === 0) return null;
 
   const lc = pts?.label==="Mangan"?"#fdcb6e":pts?.label?"#e84393":"var(--accent2)";
@@ -991,10 +992,12 @@ function ScoreSummary({ detectedYaku, doraCount, fu, isClosed }) {
           <div style={{fontSize:24,fontWeight:800,color:"var(--accent2)",lineHeight:1}}>{isYakuman?"役満":totalHan}</div>
           <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace"}}>HAN</div>
         </div>
-        <div style={{textAlign:"center"}}>
-          <div style={{fontSize:24,fontWeight:800,color:"var(--accent2)",lineHeight:1}}>{fu}</div>
-          <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace"}}>FU</div>
-        </div>
+        {fu !== null && (
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:24,fontWeight:800,color:"var(--accent2)",lineHeight:1}}>{fu}</div>
+            <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace"}}>FU</div>
+          </div>
+        )}
         {doraCount>0&&(
           <div style={{textAlign:"center"}}>
             <div style={{fontSize:24,fontWeight:800,color:"#ffd166",lineHeight:1}}>+{doraCount}</div>
@@ -1158,10 +1161,10 @@ function RiichiAnalyzer() {
   const doraCount = useMemo(()=>countDora(hand, doraIndicators, redFives), [hand, doraIndicators, redFives]);
 
   const fu = useMemo(() => {
-    if (hand.length < 14) return 30;
+    if (hand.length < 14) return null;
     const decomps = decompose([...hand]);
     const valid = decomps.filter(d => d.pair && d.melds.length === 4);
-    if (!valid.length) return 30;
+    if (!valid.length) return null;
     return calcFu(valid[0], seatWind, roundWind, "ron", isClosed);
   }, [hand, seatWind, roundWind, isClosed]);
 
