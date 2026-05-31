@@ -118,22 +118,56 @@ function removeIndices(arr, indices) {
 }
 
 // ─── Yaku Detection ───────────────────────────────────────────────────────────
-function detectYaku(tiles, seatWind = "East", roundWind = "East", declaredKans = []) {
-  if (tiles.length !== 13 && tiles.length !== 14) return [];
-  const found = [];
+function detectYaku(tiles, seatWind = "East", roundWind = "East", declaredKans = [], isClosed = true) {
+  // BUG-M fix: only a completed 14-tile hand can have yaku. Previously 13-tile hands
+  // were allowed through, and because isSevenPairs / isThirteenOrphans return true at
+  // 13 tiles (they double as tenpai checks), a 13-tile chiitoi/kokushi *tenpai* hand
+  // was reported as a detected yaku — making the UI show "✅ Yaku Detected" and a full
+  // score for an unfinished hand. Tenpai info comes from getTenpaiTiles (which passes
+  // 14-tile test hands here), so this branch never needs to fire on 13 tiles.
+  if (tiles.length !== 14) return [];
 
-  if (isThirteenOrphans(tiles)) { found.push("Thirteen Orphans"); return found; }
+  // Thirteen orphans can never also be a standard or seven-pairs hand, so it's safe to
+  // return it immediately.
+  if (isThirteenOrphans(tiles)) return ["Thirteen Orphans"];
+
+  // BUG-Q fix: a hand can be BOTH seven pairs (chiitoi) and a standard hand — the
+  // classic case is 11223 3m / 44556 6p / 99s, which reads as chiitoi (2 han) OR
+  // ryanpeikou (3 han). Standard rules score the higher interpretation. Previously the
+  // seven-pairs branch returned early and shadowed the higher standard reading. Now
+  // chiitoi is just one candidate interpretation, compared by han like the rest (BUG-P).
+  const candidates = [];
   if (isSevenPairs(tiles)) {
-    found.push("Seven Pairs");
-    if (isTsuuiisou(tiles)) found.push("All Honors");
-    return found;
+    const sp = ["Seven Pairs"];
+    if (isTsuuiisou(tiles)) sp.push("All Honors");
+    candidates.push(sp);
   }
 
-  const decomps = decompose([...tiles]);
-  const valid = decomps.filter(d => d.pair && d.melds.length === 4);
-  if (valid.length === 0) return found;
-  const best = valid[0];
+  const valid = decompose([...tiles]).filter(d => d.pair && d.melds.length === 4);
+  for (const d of valid) {
+    candidates.push(detectStandardYaku(tiles, d, seatWind, roundWind, declaredKans));
+  }
+  if (candidates.length === 0) return [];
 
+  // BUG-P fix: a hand can parse multiple ways, and different parses expose different
+  // yaku (e.g. one decomposition reads as Twin Sequences, another as Three Suit
+  // Sequences). The old code only scored valid[0]. Evaluate every candidate, total its
+  // han for the current open/closed state, and keep the highest-scoring one. (Selecting
+  // by max han also satisfies the "does any yaku exist?" question getTenpaiTiles relies
+  // on, since a list containing a yaku has han >= 1.)
+  let bestList = null, bestHan = -1;
+  for (const list of candidates) {
+    const han = list.reduce((s, y) => s + getYakuHan(y, isClosed), 0);
+    if (han > bestHan) { bestHan = han; bestList = list; }
+  }
+  return bestList || [];
+}
+
+// Detects all yaku for one specific decomposition of a 14-tile hand. Tile-based yaku
+// (flushes, tanyao, all-honors, …) don't depend on the parse but are evaluated here so
+// the returned list keeps a consistent, stable ordering for display.
+function detectStandardYaku(tiles, best, seatWind, roundWind, declaredKans) {
+  const found = [];
   if (isTanyao(tiles)) found.push("All Simples");
   if (isToitoi(best)) found.push("All Triplets");
   if (isPinfu(best, seatWind, roundWind)) found.push("Pinfu");
@@ -146,8 +180,11 @@ function detectYaku(tiles, seatWind = "East", roundWind = "East", declaredKans =
   // BUG-02 fix: Junchan implies Chanta — they are mutually exclusive
   if (isJunchan(best)) found.push("Full Outside Hand");
   else if (isChanta(best)) found.push("Half Outside Hand");
-  if (isHoniiSou(tiles)) found.push("Half Flush");
+  // BUG-12 fix: Full Flush implies Half Flush — they are mutually exclusive.
+  // isChiniiSou is a strict subset of isHoniiSou's tile patterns; without this
+  // guard a pure single-suit hand would earn both +6 and +3 han simultaneously.
   if (isChiniiSou(tiles)) found.push("Full Flush");
+  else if (isHoniiSou(tiles)) found.push("Half Flush");
   if (isSanankou(best)) found.push("Three Concealed Triplets");
   if (isShousangen(best)) found.push("Three Little Dragons");
   if (isDaisangen(best)) found.push("Three Big Dragons");
@@ -174,9 +211,16 @@ function checkYakuhai(decomp, found, seatWind, roundWind) {
   for (const meld of honorTris) {
     const num = meld.tiles[0].num;
     const name = HONORS[num - 1];
-    if (num === seatNum)  { found.push(`Yakuhai (${name} — Seat Wind)`); }
-    else if (num === roundNum) { found.push(`Yakuhai (${name} — Round Wind)`); }
-    else if (dragonNames[num]) { found.push(`Yakuhai (${name})`); }
+    // BUG-I fix: when seat wind === round wind (double-wind), a triplet of that wind
+    // scores 2 han — one for seat wind yakuhai and one for round wind yakuhai. The old
+    // `else if` meant only the seat-wind entry was pushed; the round-wind han was silently
+    // dropped. Now both entries are pushed for a double-wind triplet.
+    if (num === seatNum) {
+      found.push(`Yakuhai (${name} — Seat Wind)`);
+      if (num === roundNum) found.push(`Yakuhai (${name} — Round Wind)`);
+    } else if (num === roundNum) {
+      found.push(`Yakuhai (${name} — Round Wind)`);
+    } else if (dragonNames[num]) { found.push(`Yakuhai (${name})`); }
   }
 }
 
@@ -203,8 +247,13 @@ function isSevenPairs(tiles) {
   const v = Object.values(c);
   // 14 tiles: exactly 7 pairs
   if (tiles.length === 14) return v.length === 7 && v.every(x => x === 2);
-  // 13 tiles: 6 complete pairs + 1 singleton (tenpai waiting on the 7th pair)
-  return v.filter(x => x >= 2).length === 6 && v.filter(x => x === 1).length === 1;
+  // BUG-B fix: use Math.floor(count/2) so a quad (4 of a kind) counts as 2 pairs.
+  // A hand like [A×4, B×2, C×2, D×2, E×2, F×2] (13 tiles, 6 types) is valid
+  // chiitoi tenpai waiting on G — the old filter(x>=2) check missed this because it
+  // had 0 singletons, failing the v.filter(x===1).length===1 guard.
+  const pairsHeld = Object.values(c).reduce((s, x) => s + Math.floor(x / 2), 0);
+  const singletons = Object.values(c).filter(x => x % 2 !== 0).length;
+  return pairsHeld === 6 && singletons === 1;
 }
 function isTanyao(tiles) { return tiles.every(t => !isTerminalOrHonor(t.suit, t.num)); }
 function isToitoi(d) { return d.melds.every(m => m.type === "tri" || m.type === "kan"); }
@@ -216,8 +265,11 @@ function isPinfu(d, seatWind, roundWind) {
   if (isHonor(p.suit)) return false;
   // All melds must be sequences
   if (!d.melds.every(m => m.type === "seq")) return false;
-  // Must have a ryanmen (two-sided) wait: a sequence where neither end is 1 or 9
-  return d.melds.some(m => {
+  // BUG-A fix: we cannot know which sequence was the tenpai-completing one without a
+  // winningTile parameter. Conservatively require ALL sequences to be ryanmen-eligible
+  // (neither end at 1 or 9), accepting occasional false negatives rather than false
+  // positives. A hand like 234 456 678 789 will not be awarded Pinfu via the 789 end.
+  return d.melds.every(m => {
     const lo = m.tiles[0].num;
     const hi = m.tiles[2].num;
     return lo !== 1 && hi !== 9;
@@ -285,6 +337,11 @@ function isChiniiSou(tiles) {
   const s = new Set(tiles.map(t => t.suit));
   return s.size===1 && (s.has("man")||s.has("pin")||s.has("sou"));
 }
+// BUG-11 (known limitation): if the winning tile completes the third triplet via ron,
+// that triplet should be considered open (reducing this to only two concealed triplets).
+// Correctly detecting this requires a winningTile parameter; deferred until that
+// infrastructure is added alongside BUG-05 (wait-type fu). For now the check is
+// conservative in the sense that it may grant Sanankou in the ron-on-third-triplet edge case.
 function isSanankou(d) { return d.melds.filter(m => m.type === "tri" && !m.open).length >= 3; }
 function isShousangen(d) {
   const dn = [5,6,7];
@@ -335,7 +392,7 @@ function isSuukantsu(declaredKans) { return declaredKans.length === 4; }
 
 
 // ─── Tenpai ───────────────────────────────────────────────────────────────────
-function getTenpaiTiles(tiles, sw, rw) {
+function getTenpaiTiles(tiles, sw, rw, isClosed = true) {
   if (tiles.length !== 13) return [];
   const all = [];
   for (const suit of SUITS) for (let n = 1; n <= 9; n++) all.push({ suit, num: n });
@@ -345,8 +402,13 @@ function getTenpaiTiles(tiles, sw, rw) {
     const alreadyHeld = tiles.filter(t => tilesEqual(t, c)).length;
     if (alreadyHeld >= 4) return false;
     const test = [...tiles, c];
-    const yaku = detectYaku(test, sw, rw);
-    return yaku.length > 0 || isValidWinningHand(test);
+    const yaku = detectYaku(test, sw, rw, [], isClosed);
+    // BUG-C fix: isValidWinningHand returns true for any structurally complete hand,
+    // even one with no yaku. In standard riichi a yakuless hand cannot win (unless
+    // riichi is declared, which the analyzer cannot do on behalf of the user). Only
+    // use the structural fallback for closed hands, where riichi/menzen-tsumo would
+    // be available as implicit yaku.
+    return yaku.length > 0 || (isClosed && isValidWinningHand(test));
   });
 }
 function isValidWinningHand(tiles) {
@@ -360,8 +422,12 @@ function isValidWinningHand(tiles) {
 function calcFu(decomp, seatWind, roundWind, winType = "ron", isClosed = true) {
   if (!decomp || !decomp.pair) return 30;
 
-  // Base fu: tsumo starts at 20, ron at 30
-  let fu = winType === "tsumo" ? 20 : 30;
+  // Base fu: tsumo always starts at 20 (no menzen bonus on tsumo). Ron starts at 20
+  // and only a CLOSED ron earns the +10 menzen-ron bonus (→30). An open ron does not.
+  // BUG-N fix: previously this was a flat 30 for every ron, giving open ron the closed
+  // bonus and inflating fu/score. Open all-sequence ron is floored to 30 below to match
+  // common rules (an open hand cannot be pinfu, so it would otherwise drop to 20).
+  let fu = winType === "tsumo" ? 20 : (isClosed ? 30 : 20);
 
   // Tsumo bonus (+2 fu) — applies to all tsumo wins except pinfu
   const hasPinfu = isPinfu(decomp, seatWind, roundWind);
@@ -396,6 +462,14 @@ function calcFu(decomp, seatWind, roundWind, winType = "ron", isClosed = true) {
   // that had a ryanmen wait somewhere else, or to triplet-only hands via the seq guard).
   // Fu is omitted here and will only be accurate once a winningTile parameter is
   // added to calcFu. The rounded-up result remains playable as a conservative estimate.
+
+  // BUG-N fix (kuipinfu floor): an open ron with all sequences and no triplet/pair fu
+  // would otherwise land at 20 base fu. Common rules floor this open "pinfu-shape" ron
+  // to 30 fu (an open hand cannot claim Pinfu itself, but isn't paid as 20 either).
+  if (winType === "ron" && !isClosed) {
+    const allSeq = decomp.melds.every(m => m.type === "seq");
+    if (allSeq && fu === 20) fu = 30;
+  }
 
   return Math.ceil(fu / 10) * 10;
 }
@@ -508,7 +582,15 @@ function yakuProximity(name, tiles, sw, rw) {
   switch(name) {
     case "Thirteen Orphans": return thirteenOrphansShanten(tiles);
     case "Seven Pairs": return sevenPairsShanten(tiles);
-    case "All Simples": return standardShanten(tiles)+tiles.filter(t=>isTerminalOrHonor(t.suit,t.num)).length;
+    case "All Simples": {
+      // BUG-O fix: same double-count class as D–H. The old code ran standardShanten on
+      // the full hand AND added the terminal/honor count on top. Mirror the All Honors
+      // pattern: take shanten of just the simples (2–8), then add the count of
+      // off-target (terminal/honor) tiles that must be replaced.
+      const isSimple = t => !isTerminalOrHonor(t.suit, t.num);
+      const off = tiles.filter(t => !isSimple(t)).length;
+      return Math.max(0, standardShanten(tiles.filter(isSimple)) + off);
+    }
     case "All Triplets": {
       // Need 4 triplets + 1 pair = 14 tiles total
       const c = countMap(tiles); let trips = 0, pairs = 0;
@@ -561,6 +643,12 @@ function yakuProximity(name, tiles, sw, rw) {
     }
     case "All Honors": {const nh=tiles.filter(t=>!isHonor(t.suit)).length;return Math.max(0,standardShanten(tiles.filter(t=>isHonor(t.suit)))+nh);}
     case "All Terminals": {const nt=tiles.filter(t=>!isTerminal(t.suit,t.num)).length;return Math.max(0,standardShanten(tiles.filter(t=>isTerminal(t.suit,t.num)))+nt);}
+    // BUG-K fix: Terminals and Honors was in YAKU_INFO but had no proximity case and
+    // was not in buildProximityList, so it never appeared. Added both here and above.
+    case "Terminals and Honors": {
+      const nonTH = tiles.filter(t => !isTerminalOrHonor(t.suit, t.num)).length;
+      return Math.max(0, standardShanten(tiles.filter(t => isTerminalOrHonor(t.suit, t.num))) + nonTH);
+    }
     case "All Green": {
       const gk=new Set(["sou|2","sou|3","sou|4","sou|6","sou|8","honor|6"]);
       const ng=tiles.filter(t=>!gk.has(`${t.suit}|${t.num}`)).length;
@@ -576,50 +664,117 @@ function yakuProximity(name, tiles, sw, rw) {
       return Math.max(0,best);
     }
     case "Three Big Dragons": {
-      const c={};tiles.filter(t=>t.suit==="honor"&&[5,6,7].includes(t.num)).forEach(t=>c[t.num]=(c[t.num]||0)+1);
-      return Math.max(0,[5,6,7].reduce((a,n)=>a+Math.max(0,3-(c[n]||0)),0)+standardShanten(tiles));
+      // BUG-13 fix: compute shanten only on tiles not consumed by dragon triplets.
+      const c={};
+      tiles.filter(t=>t.suit==="honor"&&[5,6,7].includes(t.num)).forEach(t=>c[t.num]=(c[t.num]||0)+1);
+      const dragonNeed = [5,6,7].reduce((a,n)=>a+Math.max(0,3-(c[n]||0)),0);
+      // Remove allocated dragon tiles from the pool before computing shanten
+      const pool = [...tiles];
+      for (const dn of [5,6,7]) {
+        const take = Math.min(c[dn]||0, 3);
+        for (let i=0;i<take;i++) { const idx=pool.findIndex(t=>t.suit==="honor"&&t.num===dn); if(idx!==-1) pool.splice(idx,1); }
+      }
+      return Math.max(0, dragonNeed + standardShanten(pool));
     }
     case "Four Big Winds": {
-      const c={};tiles.filter(t=>t.suit==="honor"&&[1,2,3,4].includes(t.num)).forEach(t=>c[t.num]=(c[t.num]||0)+1);
-      return Math.max(0,[1,2,3,4].reduce((a,n)=>a+Math.max(0,3-(c[n]||0)),0)+standardShanten(tiles));
-    }
-    case "Four Little Winds": {
-      // Need 3 wind triplets + 1 wind pair
+      // BUG-E fix: same double-count class as BUG-D. Allocate wind triplet tiles out
+      // of the pool before calling standardShanten on the remainder (which just needs
+      // to form a pair — the only unconstrained group for this yakuman).
       const c = {};
       tiles.filter(t => t.suit === "honor" && [1,2,3,4].includes(t.num))
            .forEach(t => c[t.num] = (c[t.num] || 0) + 1);
-      // Try each wind as the pair candidate; pick the one with minimum tiles needed
+      let need = 0;
+      const pool = [...tiles];
+      for (const w of [1,2,3,4]) {
+        const have = c[w] || 0;
+        need += Math.max(0, 3 - have);
+        for (let i = 0; i < Math.min(have, 3); i++) {
+          const idx = pool.findIndex(t => t.suit === "honor" && t.num === w);
+          if (idx !== -1) pool.splice(idx, 1);
+        }
+      }
+      // Remaining tiles just need to form a pair
+      const pairShanten = Object.values(countMap(pool)).some(v => v >= 2) ? 0 : 1;
+      return Math.max(0, need + pairShanten);
+    }
+    case "Four Little Winds": {
+      // BUG-13 fix: `best` already counts the tiles needed to complete the wind requirements.
+      // Adding standardShanten(tiles) of the full hand double-counts that work.
+      // Instead, compute shanten only on the tiles NOT consumed by the wind groups.
+      // Need 3 wind triplets + 1 wind pair — try each wind as the pair candidate.
+      const c = {};
+      tiles.filter(t => t.suit === "honor" && [1,2,3,4].includes(t.num))
+           .forEach(t => c[t.num] = (c[t.num] || 0) + 1);
       let best = 99;
       for (const pairWind of [1,2,3,4]) {
         let need = 0;
+        // Build the pool of tiles left after allocating wind groups
+        const pool = [...tiles];
+        const allocate = (num, count) => {
+          for (let i = 0; i < count; i++) {
+            const idx = pool.findIndex(t => t.suit === "honor" && t.num === num);
+            if (idx !== -1) pool.splice(idx, 1);
+          }
+        };
         for (const w of [1,2,3,4]) {
           const have = c[w] || 0;
-          need += w === pairWind ? Math.max(0, 2 - have) : Math.max(0, 3 - have);
+          if (w === pairWind) {
+            need += Math.max(0, 2 - have);
+            allocate(w, Math.min(have, 2));
+          } else {
+            need += Math.max(0, 3 - have);
+            allocate(w, Math.min(have, 3));
+          }
         }
-        best = Math.min(best, need);
+        best = Math.min(best, need + standardShanten(pool));
       }
-      return Math.max(0, best + standardShanten(tiles));
+      return Math.max(0, best);
     }
     case "Three Little Dragons": {
-      // Need 2 dragon triplets + 1 dragon pair — any dragon can be the pair
+      // BUG-D fix: mirror BUG-13 / Four Little Winds pattern — allocate the best
+      // dragon configuration tiles out of a pool, then call standardShanten only on
+      // the remainder. The old code added `need` (dragon tile deficit) ON TOP of
+      // standardShanten(tiles) for the whole hand, double-counting that work.
       const c = {};
       tiles.filter(t => t.suit === "honor" && [5,6,7].includes(t.num))
            .forEach(t => c[t.num] = (c[t.num] || 0) + 1);
       let best = 99;
-      for (const pairDragon of [5,6,7]) {
+      for (const pairDragon of [5, 6, 7]) {
         let need = 0;
-        for (const d of [5,6,7]) {
+        const pool = [...tiles];
+        const allocate = (num, count) => {
+          for (let i = 0; i < count; i++) {
+            const idx = pool.findIndex(t => t.suit === "honor" && t.num === num);
+            if (idx !== -1) pool.splice(idx, 1);
+          }
+        };
+        for (const d of [5, 6, 7]) {
           const have = c[d] || 0;
-          need += d === pairDragon ? Math.max(0, 2 - have) : Math.max(0, 3 - have);
+          const want = d === pairDragon ? 2 : 3;
+          need += Math.max(0, want - have);
+          allocate(d, Math.min(have, want));
         }
-        best = Math.min(best, need);
+        best = Math.min(best, need + standardShanten(pool));
       }
-      return Math.max(0, best + standardShanten(tiles));
+      return Math.max(0, best);
     }
     case "Straight": {
-      let best=99;
-      for(const suit of SUITS){const h=overlapCount(tiles,[1,2,3,4,5,6,7,8,9].map(n=>({suit,num:n})));best=Math.min(best,9-h+standardShanten(tiles));}
-      return Math.max(0,best);
+      // BUG-G fix: after allocating the 9 straight tiles into the pool, call
+      // standardShanten only on the remainder (the 4th meld + pair tiles), not the
+      // full tile set. The old code also called standardShanten on the full unmodified
+      // hand, inflating the score.
+      let best = 99;
+      for (const suit of SUITS) {
+        const pool = [...tiles];
+        let have = 0;
+        for (let n = 1; n <= 9; n++) {
+          const idx = pool.findIndex(t => t.suit === suit && t.num === n);
+          if (idx !== -1) { pool.splice(idx, 1); have++; }
+        }
+        const need = 9 - have;
+        best = Math.min(best, need + standardShanten(pool));
+      }
+      return Math.max(0, best);
     }
     case "Half Outside Hand": return Math.max(0,standardShanten(tiles)+Math.floor(tiles.filter(t=>!isTerminalOrHonor(t.suit,t.num)).length/3));
     case "Full Outside Hand": return Math.max(0,standardShanten(tiles)+Math.floor(tiles.filter(t=>!isTerminal(t.suit,t.num)).length/3));
@@ -645,23 +800,46 @@ function yakuProximity(name, tiles, sw, rw) {
       return Math.max(0, best);
     }
     case "Three Suit Triplets": {
-      let best=99;
-      for(let n=1;n<=9;n++){let need=0;for(const suit of SUITS){need+=Math.max(0,3-tiles.filter(t=>t.suit===suit&&t.num===n).length);}best=Math.min(best,need+standardShanten(tiles));}
-      return Math.max(0,best);
+      // BUG-F fix: remove the 9 matched triplet tiles from a pool copy before calling
+      // standardShanten, so the remaining shanten is only for the unconstrained meld+pair.
+      let best = 99;
+      for (let n = 1; n <= 9; n++) {
+        let need = 0;
+        const pool = [...tiles];
+        for (const suit of SUITS) {
+          const have = tiles.filter(t => t.suit === suit && t.num === n).length;
+          need += Math.max(0, 3 - have);
+          for (let i = 0; i < Math.min(have, 3); i++) {
+            const idx = pool.findIndex(t => t.suit === suit && t.num === n);
+            if (idx !== -1) pool.splice(idx, 1);
+          }
+        }
+        best = Math.min(best, need + standardShanten(pool));
+      }
+      return Math.max(0, best);
     }
     case "Three Concealed Triplets": {
-      // Need 3 sets of 3 identical tiles (concealed)
+      // BUG-H fix: the old estimate added standardShanten(tiles) on top of the tile-
+      // need estimate, double-counting. Instead allocate the best 3 triplets (or
+      // partials) from the pool and call standardShanten on what's left.
       const c = countMap(tiles);
-      let trips = 0, pairs = 0;
-      for (const v of Object.values(c)) {
-        if (v >= 3) trips++;
-        else if (v >= 2) pairs++;
+      const entries = Object.entries(c).map(([k, v]) => ({ k, v })).sort((a,b) => b.v - a.v);
+      const pool = [...tiles];
+      let need = 0;
+      let tripsFilled = 0;
+      for (const { k, v } of entries) {
+        if (tripsFilled >= 3) break;
+        const [suit, numStr] = k.split("|");
+        const num = parseInt(numStr);
+        const take = Math.min(v, 3);
+        need += Math.max(0, 3 - v);
+        for (let i = 0; i < take; i++) {
+          const idx = pool.findIndex(t => t.suit === suit && t.num === num);
+          if (idx !== -1) pool.splice(idx, 1);
+        }
+        tripsFilled++;
       }
-      const need = Math.max(0, 3 - trips);
-      // Each missing triplet needs: 2 more tiles if we have a pair, 3 if we have nothing
-      // Approximate: pairs can become trips with 1 tile, singletons need 2
-      const pairsAvail = Math.min(pairs, need);
-      return Math.max(0, pairsAvail * 1 + (need - pairsAvail) * 2 + standardShanten(tiles));
+      return Math.max(0, need + standardShanten(pool));
     }
     case "Double Twin Sequences": {
       // Need two pairs of identical sequences (4 melds total), each pair being the same sequence.
@@ -702,7 +880,7 @@ function buildProximityList(sw, rw) {
     "Three Concealed Triplets",
     "Half Flush","Full Flush","Half Outside Hand","Full Outside Hand",
     "Straight","Three Suit Sequences","Three Suit Triplets",
-    "All Honors","All Terminals","All Green","Nine Gates","Thirteen Orphans",
+    "All Honors","All Terminals","All Green","Terminals and Honors","Nine Gates","Thirteen Orphans",
     "Three Little Dragons","Three Big Dragons","Four Little Winds","Four Big Winds",
   ];
   const yakuhai = [
@@ -773,15 +951,27 @@ const YAKU_INFO = {
 const YAKUMAN_PTS = { nonDealerRon:32000, dealerRon:48000, label:"Yakuman" };
 
 function hanToPoints(han, fu=30) {
-  if (han>=13) return YAKUMAN_PTS;
-  if (han>=11) return { nonDealerRon:24000, dealerRon:36000, label:"Triple Mangan" };
-  if (han>=8)  return { nonDealerRon:16000, dealerRon:24000, label:"Double Mangan" };
-  if (han>=5)  return { nonDealerRon:8000,  dealerRon:12000, label:"Mangan" };
+  // BUG-10 fix: include tsumo payment breakdowns alongside ron values.
+  // Non-dealer tsumo: tsumoNonDealerEach (×2 opponents) + tsumoNonDealerDealer (×1 dealer).
+  // Dealer tsumo: tsumoDealer (×3 non-dealers each).
+  if (han>=13) return { nonDealerRon:32000, dealerRon:48000,
+    tsumoDealer:16000, tsumoNonDealerEach:8000, tsumoNonDealerDealer:16000, label:"Yakuman" };
+  if (han>=11) return { nonDealerRon:24000, dealerRon:36000,
+    tsumoDealer:12000, tsumoNonDealerEach:6000, tsumoNonDealerDealer:12000, label:"Triple Mangan" };
+  if (han>=8)  return { nonDealerRon:16000, dealerRon:24000,
+    tsumoDealer:8000,  tsumoNonDealerEach:4000, tsumoNonDealerDealer:8000,  label:"Double Mangan" };
+  if (han>=5)  return { nonDealerRon:8000,  dealerRon:12000,
+    tsumoDealer:4000,  tsumoNonDealerEach:2000, tsumoNonDealerDealer:4000,  label:"Mangan" };
   const basic = fu*Math.pow(2,han+2);
-  if (basic>=2000) return { nonDealerRon:8000, dealerRon:12000, label:"Mangan" };
+  if (basic>=2000) return { nonDealerRon:8000, dealerRon:12000,
+    tsumoDealer:4000,  tsumoNonDealerEach:2000, tsumoNonDealerDealer:4000,  label:"Mangan" };
+  const tsumoNonDealerEach   = Math.ceil(basic*2/100)*100;
+  const tsumoNonDealerDealer = Math.ceil(basic*4/100)*100;
+  const tsumoDealer          = Math.ceil(basic*2/100)*100;
   return {
     nonDealerRon: Math.ceil(basic*4/100)*100,
     dealerRon:    Math.ceil(basic*6/100)*100,
+    tsumoDealer, tsumoNonDealerEach, tsumoNonDealerDealer,
     label: null,
   };
 }
@@ -979,14 +1169,17 @@ function DoraPanel({ doraIndicators, onAddDora, onRemoveDora, redFives, onToggle
 }
 
 // Score summary panel — shown when yaku detected
-function ScoreSummary({ detectedYaku, doraCount, fu, isClosed }) {
+// BUG-10 fix: accepts winType prop and renders tsumo split payments when applicable.
+function ScoreSummary({ detectedYaku, doraCount, fu, isClosed, winType }) {
   const isYakuman = detectedYaku.some(y => (YAKU_INFO[y] || {}).yakuman);
   const baseHan = detectedYaku.reduce((s, y) => s + getYakuHan(y, isClosed), 0);
   const totalHan = isYakuman ? baseHan : baseHan + doraCount;
-  const pts = isYakuman ? YAKUMAN_PTS : (totalHan > 0 ? hanToPoints(totalHan, fu ?? 30) : null);
+  const pts = isYakuman ? hanToPoints(13, fu ?? 30) : (totalHan > 0 ? hanToPoints(totalHan, fu ?? 30) : null);
   if (totalHan === 0 && doraCount === 0) return null;
 
   const lc = pts?.label==="Mangan"?"#fdcb6e":pts?.label?"#e84393":"var(--accent2)";
+  const isTsumo = winType === "tsumo";
+
   return (
     <div style={{
       marginTop:12,padding:"11px 13px",borderRadius:10,
@@ -1013,10 +1206,31 @@ function ScoreSummary({ detectedYaku, doraCount, fu, isClosed }) {
         {pts&&(
           <div style={{marginLeft:"auto",textAlign:"right"}}>
             {pts.label&&<div style={{fontSize:11,fontWeight:800,color:lc,marginBottom:2}}>{pts.label}</div>}
-            <div style={{fontSize:20,fontWeight:800,color:lc,lineHeight:1}}>{formatPts(pts.nonDealerRon)}</div>
-            <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace"}}>
-              non-dealer · <span style={{color:"var(--text2)"}}>{formatPts(pts.dealerRon)}</span> dealer
-            </div>
+            {isTsumo ? (
+              <>
+                {/* Non-dealer tsumo: two non-dealers each pay tsumoNonDealerEach, dealer pays tsumoNonDealerDealer */}
+                <div style={{fontSize:13,fontWeight:800,color:lc,lineHeight:1.3}}>
+                  {formatPts(pts.tsumoNonDealerEach)} <span style={{fontSize:9,color:"var(--text3)"}}>× 2</span>
+                  {" / "}{formatPts(pts.tsumoNonDealerDealer)} <span style={{fontSize:9,color:"var(--text3)"}}>dealer</span>
+                </div>
+                <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace",marginTop:1}}>
+                  tsumo · non-dealer wins
+                </div>
+                <div style={{fontSize:11,fontWeight:700,color:"#6abcff",marginTop:4,lineHeight:1.3}}>
+                  {formatPts(pts.tsumoDealer)} <span style={{fontSize:9,color:"var(--text3)"}}>× 3</span>
+                </div>
+                <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace",marginTop:1}}>
+                  tsumo · dealer wins
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{fontSize:20,fontWeight:800,color:lc,lineHeight:1}}>{formatPts(pts.nonDealerRon)}</div>
+                <div style={{fontSize:9,color:"var(--text3)",fontFamily:"'Space Mono',monospace"}}>
+                  non-dealer · <span style={{color:"var(--text2)"}}>{formatPts(pts.dealerRon)}</span> dealer
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -1140,11 +1354,11 @@ function RiichiAnalyzer() {
   const [winType, setWinType] = useState("ron"); // BUG-04 fix: track tsumo vs ron
   const [redFives, setRedFives] = useState(false);
 
-  const runAnalysis = useCallback((tiles, sw, rw) => {
-    setDetected(detectYaku(tiles, sw, rw));
+  const runAnalysis = useCallback((tiles, sw, rw, closed = isClosed) => {
+    setDetected(detectYaku(tiles, sw, rw, [], closed));
     setProximity(scoreAllYaku(tiles, sw, rw));
-    setTenpai(tiles.length === 13 ? getTenpaiTiles(tiles, sw, rw) : []);
-  }, []);
+    setTenpai(tiles.length === 13 ? getTenpaiTiles(tiles, sw, rw, closed) : []);
+  }, [isClosed]);
 
   const addTile = useCallback((suit, num) => {
     if (hand.length >= 14) return;
@@ -1253,7 +1467,7 @@ function RiichiAnalyzer() {
                     color:winType==="tsumo"?"#00c896":"#ffd166",
                     fontSize:11,fontWeight:700,fontFamily:"'Sora',sans-serif",transition:"all 0.15s",
                   }}>{winType==="tsumo"?"🀄 Tsumo":"🎯 Ron"}</button>
-                  <button onClick={()=>setIsClosed(v=>!v)} style={{
+                  <button onClick={()=>{const nc=!isClosed;setIsClosed(nc);runAnalysis(hand,seatWind,roundWind,nc);}} style={{
                     padding:"4px 11px",borderRadius:12,cursor:"pointer",
                     border:`1px solid ${isClosed?"rgba(176,159,255,0.4)":"rgba(58,158,255,0.4)"}`,
                     background:isClosed?"rgba(176,159,255,0.1)":"rgba(58,158,255,0.1)",
@@ -1276,7 +1490,7 @@ function RiichiAnalyzer() {
               </div>
               {hand.length>0 && <div className="hand-click-hint">Click a tile to remove it</div>}
               {detected.length>0 && (
-                <ScoreSummary detectedYaku={detected} doraCount={doraCount} fu={fu} isClosed={isClosed}/>
+                <ScoreSummary detectedYaku={detected} doraCount={doraCount} fu={fu} isClosed={isClosed} winType={winType}/>
               )}
             </div>
 
