@@ -1390,11 +1390,18 @@ function RiichiAnalyzer() {
   }, [hand, seatWind, roundWind, isClosed, winType]);
 
   const proxFiltered = useMemo(() => {
-    let list = openFilter
+    // BUG-R fix: an open hand cannot achieve closed-only yaku (Pinfu, Riichi, Seven
+    // Pairs, Twin Sequences, …), so toggling the hand to Open must remove them from the
+    // proximity list. Previously closed-only filtering was driven ONLY by the manual
+    // "Open Only" button (openFilter) and was never tied to the isClosed hand state, so
+    // switching to an open hand left the impossible yaku in the list. Now we hide
+    // closed-only yaku whenever the hand is open OR the manual filter is on.
+    const hideClosedOnly = !isClosed || openFilter;
+    let list = hideClosedOnly
       ? proximity.filter(p => !(p.info.closedOnly || p.info.hanOpen===null))
       : proximity;
     return showAll ? list : list.slice(0,10);
-  }, [proximity, openFilter, showAll]);
+  }, [proximity, openFilter, showAll, isClosed]);
 
   const proxLabel = hand.length===0 ? "Yaku Proximity"
     : detected.length>0 ? `✅ ${detected.length} Yaku Detected`
@@ -1506,14 +1513,19 @@ function RiichiAnalyzer() {
               <div className="prox-header">
                 <div className="section-label" style={{marginBottom:0}}>{proxLabel}</div>
                 <div style={{display:"flex",gap:6}}>
-                  <button className="show-all-btn"
-                    style={{
-                      borderColor:openFilter?"rgba(58,158,255,0.5)":undefined,
-                      color:openFilter?"#3b9eff":undefined,
-                      background:openFilter?"rgba(58,158,255,0.1)":undefined,
-                    }}
-                    onClick={()=>setOpenFilter(v=>!v)}
-                  >{openFilter?"All Yaku":"📂 Open Only"}</button>
+                  {/* BUG-R: the manual filter only makes sense on a closed hand. When the
+                      hand is open, closed-only yaku are already force-hidden, so showing
+                      this toggle (which would appear to "do nothing") is just confusing. */}
+                  {isClosed && (
+                    <button className="show-all-btn"
+                      style={{
+                        borderColor:openFilter?"rgba(58,158,255,0.5)":undefined,
+                        color:openFilter?"#3b9eff":undefined,
+                        background:openFilter?"rgba(58,158,255,0.1)":undefined,
+                      }}
+                      onClick={()=>setOpenFilter(v=>!v)}
+                    >{openFilter?"All Yaku":"📂 Open Only"}</button>
+                  )}
                   {proximity.length>0&&(
                     <button className="show-all-btn" onClick={()=>setShowAll(v=>!v)}>
                       {showAll?"Top 10":"Show All"}
